@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MealPrep</title>
+<link rel="stylesheet" href="style.css">
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#2f7d4f">
+<link rel="icon" href="icon.svg">
+<link rel="apple-touch-icon" href="icon-192.png">
+</head>
+<body>
+<header>
+  <h1>🥗 MealPrep</h1>
+  <nav id="tabs">
+    <button data-tab="plan" class="on">Piano</button>
+    <button data-tab="shop">Spesa</button>
+    <button data-tab="recipes">Ricette</button>
+    <button data-tab="track">Tracker</button>
+    <button data-tab="cal">Calendario</button>
+    <button data-tab="settings">Profilo</button>
+    <button data-tab="data">Dati</button>
+  </nav>
+</header>
+<main id="view"></main>
+<div id="modal" hidden><div class="sheet"><button class="x" id="close">✕</button><div id="modal-body"></div></div></div>
+<script type="module" src="app.js"></script>
+</body>
+</html>
