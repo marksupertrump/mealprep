@@ -153,7 +153,7 @@ function searchPlan(ctx, { weekStart, seed, iterations, locked }) {
       pen += Math.abs(kcal - kcalTarget) / 30;
       if (pro < S.protein_g) pen += (S.protein_g - pro) / 0.8;
       const ids = day.map((e) => e.recipe.id);
-      pen += (ids.length - new Set(ids).size) * 14; // stesso piatto due volte nello stesso giorno = noia
+      pen += (ids.length - new Set(ids).size) * 300; // regola: lo stesso piatto non compare due volte nello stesso giorno
     }
     const eaten = new Map(); // varietà: oltre 4 pasti dello stesso piatto a settimana si annoia
     for (const e of entries) eaten.set(e.recipe.id, (eaten.get(e.recipe.id) ?? 0) + 1);
