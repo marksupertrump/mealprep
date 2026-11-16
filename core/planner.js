@@ -14,7 +14,9 @@ export function nextMonday(from = new Date()) {
 }
 
 const mealIdx = (e) => e.day * 10 + MEAL_ORDER.indexOf(e.meal);
-const isBatch = (r) => r.servings >= 3; // ricette "da più giorni": si cucinano a batch intero
+const isMain = (r) => r.meal === 'main';
+// Colazioni/spuntini da più porzioni: batch intero su più giorni. Pranzi/cene: una sessione = max 2 pasti in 2 giorni consecutivi.
+const isBatch = (r) => !isMain(r) && r.servings >= 2;
 
 export function slotScale(r, targetKcal) {
   const s = targetKcal / Math.max(r.kcal, 1);
@@ -33,23 +35,27 @@ export function cookPlan(entries) {
     const r = list[0].recipe, batch = isBatch(r);
     let open = null;
     for (const e of list) {
-      const fits = open && e.day - open.startDay <= r.fridge && (!batch || open.used + e.scale <= open.cap * 1.25 + 0.01);
-      if (!fits) { open = { recipe: r, startDay: e.day, cap: batch ? r.servings : 0, used: 0, entries: [] }; batches.push(open); }
-      open.used += e.scale; open.entries.push(e);
+      const fits = isMain(r)
+        ? open && e.day - open.lastDay <= 1 && open.entries.length < 2
+        : open && e.day - open.startDay <= r.fridge && (!batch || open.used + e.scale <= open.cap * 1.25 + 0.01);
+      if (!fits) { open = { recipe: r, startDay: e.day, lastDay: e.day, cap: batch ? r.servings : 0, used: 0, entries: [] }; batches.push(open); }
+      open.lastDay = e.day; open.used += e.scale; open.entries.push(e);
     }
   }
-  let minutes = 0, leftoverValue = 0, leftoverPortions = 0;
+  let minutes = 0, leftoverValue = 0, leftoverPortions = 0, gaps = 0;
   for (const b of batches) {
     b.batch = isBatch(b.recipe);
     b.factor = b.batch ? Math.max(1, Math.ceil((b.used / b.cap) * 4) / 4) : b.used / b.recipe.servings; // si cucina in proporzione, mai meno di 1 ricetta
     b.leftover = b.batch ? Math.max(0, b.factor * b.cap - b.used) : 0;
     minutes += b.recipe.prep_min + b.recipe.cook_min;
+    const days = new Set(b.entries.map((e) => e.day)); // giorni "vuoti" fra una porzione e l'altra: le porzioni vanno mangiate in giorni di fila
+    gaps += Math.max(0, Math.max(...days) - Math.min(...days) + 1 - days.size);
     // avanzi a fine settimana: si possono ancora mangiare la settimana dopo, penalità dimezzata
     const lastEat = b.startDay + b.recipe.fridge;
     const w = lastEat >= 7 ? 0.5 : 1;
     leftoverValue += b.leftover * (b.recipe.est_cost ?? 1) * w; leftoverPortions += b.leftover * w;
   }
-  return { batches, minutes, leftoverValue, leftoverPortions };
+  return { batches, minutes, leftoverValue, leftoverPortions, gaps };
 }
 
 // Costo d'acquisto + spreco. Freschi: confezione intera (l'avanzo è spreco). Alimenti che durano: solo il consumato.
@@ -132,6 +138,7 @@ function searchPlan(ctx, { weekStart, seed, iterations, locked }) {
   }
 
   const batchRecipes = recipes.filter((r) => isBatch(r) && r.meal !== 'snack');
+  const mainRecipes = recipes.filter(isMain);
   const poolIdx = { colazione: [], main: [], snack: [] };
   slots.forEach((sl, i) => poolIdx[sl.pool].push(i));
   const kcalTarget = S.kcal_target;
@@ -145,7 +152,7 @@ function searchPlan(ctx, { weekStart, seed, iterations, locked }) {
     pen += ev.cost > S.budget_week ? (ev.cost - S.budget_week) * 9 : (ev.cost / S.budget_week) * 2;
     if (ev.cost > S.budget_max) pen += (ev.cost - S.budget_max) * 30;
     pen += ev.waste * 3 + ev.spoil;
-    pen += ev.cook.minutes / 6 + ev.cook.leftoverValue * 6 + ev.cook.leftoverPortions * 2;
+    pen += ev.cook.minutes / 6 + ev.cook.leftoverValue * 6 + ev.cook.leftoverPortions * 2 + ev.cook.gaps * 5;
     for (let d = 0; d < 7; d++) {
       const day = entries.filter((e) => e.day === d);
       const kcal = day.reduce((a, e) => a + e.recipe.kcal * e.scale, 0);
@@ -155,6 +162,10 @@ function searchPlan(ctx, { weekStart, seed, iterations, locked }) {
       const ids = day.map((e) => e.recipe.id);
       pen += (ids.length - new Set(ids).size) * 300; // regola: lo stesso piatto non compare due volte nello stesso giorno
     }
+    for (const b of ev.cook.batches) if (isMain(b.recipe) && b.recipe.servings >= 2 && b.entries.length < 2) pen += 9; // una ricetta da più porzioni cucinata per una sola: meglio in coppia
+    const mainDays = new Map(); // lo stesso pranzo/cena non più di 2 giorni di fila
+    for (const e of entries) if (e.pool === 'main') { if (!mainDays.has(e.recipe.id)) mainDays.set(e.recipe.id, new Set()); mainDays.get(e.recipe.id).add(e.day); }
+    for (const set of mainDays.values()) { const d = [...set].sort((a, b) => a - b); let run = 1; for (let i = 1; i < d.length; i++) { run = d[i] === d[i - 1] + 1 ? run + 1 : 1; if (run > 2) pen += 150; } }
     const eaten = new Map(); // varietà: oltre 4 pasti dello stesso piatto a settimana si annoia
     for (const e of entries) eaten.set(e.recipe.id, (eaten.get(e.recipe.id) ?? 0) + 1);
     for (const n of eaten.values()) if (n > 4) pen += (n - 4) * 10;
@@ -168,9 +179,13 @@ function searchPlan(ctx, { weekStart, seed, iterations, locked }) {
   let cur = slots.map((s, i) => locked[i] ?? pick(pools[s.pool])), curScore = score(cur);
   for (let it = 0; it < iterations; it++) {
     const cand = cur.slice();
-    if (batchRecipes.length && rnd() < 0.35) {
+    if (rnd() < 0.2) {
+      // coppia: stesso pranzo/cena oggi e domani (si cucina una volta, il giorno dopo si mangia l'altra porzione)
+      const r = pick(mainRecipes), idx = poolIdx.main, p = Math.floor(rnd() * idx.length), q = p + (rnd() < 0.5 ? 2 : 3);
+      if (q < idx.length && locked[idx[p]] == null && locked[idx[q]] == null) { cand[idx[p]] = r; cand[idx[q]] = r; }
+    } else if (batchRecipes.length && rnd() < 0.35) {
       // mossa a batch: una ricetta da più porzioni occupa gli slot consecutivi dello stesso tipo
-      const r = pick(batchRecipes), idx = poolIdx[r.meal === 'main' ? 'main' : r.meal];
+      const r = pick(batchRecipes), idx = poolIdx[r.meal];
       const p = Math.floor(rnd() * idx.length);
       for (let k = 0; k < r.servings && p + k < idx.length; k++) if (locked[idx[p + k]] == null) cand[idx[p + k]] = r;
     } else {
