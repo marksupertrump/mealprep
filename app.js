@@ -1,5 +1,5 @@
 import { api, icsText } from './api.js';
-import { state as store, exportBackup, importFile } from './store.js';
+import { state as store, exportBackup, importFile, stamp } from './store.js';
 const $ = (s, el = document) => el.querySelector(s);
 const eur = (n) => (n ?? 0).toLocaleString('it-IT', { style: 'currency', currency: 'EUR' });
 const g = (n) => (n >= 1000 ? (n / 1000).toFixed(n % 1000 ? 2 : 0).replace(/\.?0+$/, '') + ' kg' : Math.round(n) + ' g');
@@ -39,13 +39,14 @@ function renderPlan() {
     <div class="kpi ${Math.abs(avgK - S.kcal_target) < 100 ? 'ok' : 'bad'}"><span class="mut small">Kcal medie / giorno</span><b>${avgK}</b><span class="small mut">target ${S.kcal_target}</span></div>
     <div class="kpi ${avgP >= S.protein_g * 0.93 ? 'ok' : 'bad'}"><span class="mut small">Proteine medie / giorno</span><b>${avgP} g</b><span class="small mut">target ${S.protein_g} g</span></div>
     <div class="kpi ${sh.weeklyCost > S.budget_max ? 'bad' : over ? '' : 'ok'}"><span class="mut small">Costo reale settimana</span><b>${eur(sh.weeklyCost)}</b><span class="small mut">budget ${eur(S.budget_week)} (max ${eur(S.budget_max)})</span></div>
+    <div class="kpi"><span class="mut small">Sessioni di cucina</span><b>${state.cooking.sessions}</b><span class="small mut">~${Math.round(state.cooking.minutes / 60 * 10) / 10} h in totale</span></div>
     <div class="kpi"><span class="mut small">Spreco stimato</span><b>${g(sh.wasteG)}</b><span class="small mut">≈ ${eur(sh.wasteEur)} di freschi avanzati</span></div>
   </div>
   <div class="days">${days.map((slots, d) => {
     const date = slots[0]?.date, t = totals[date] ?? {};
     return `<div class="card day"><h3><span>${DOW[d]} ${fmtDate(date)}</span><span class="mut small">${t.kcal} kcal · ${t.protein}P · ${t.carbs}C · ${t.fat}F</span></h3>
       <div class="bar"><i style="width:${Math.min(100, (t.kcal / S.kcal_target) * 100)}%"></i></div>
-      ${slots.map((s) => `<div class="slot"><span class="m">${MEAL[s.meal]}</span><div class="t"><b>${esc(s.recipe.title)}</b><span class="small mut">${s.scale}× porzione · ${Math.round(s.recipe.kcal * s.scale)} kcal · ${Math.round(s.recipe.protein * s.scale)}P</span></div>
+      ${slots.map((s) => `<div class="slot"><span class="m">${MEAL[s.meal]}</span><div class="t"><b>${esc(s.recipe.title)}</b><span class="small mut">${s.scale}× porzione · ${Math.round(s.recipe.kcal * s.scale)} kcal · ${Math.round(s.recipe.protein * s.scale)}P</span>${cookTag(s)}</div>
       <button class="btn sm" data-open="${s.recipe.id}" data-scale="${s.scale}">Esplodi</button><button class="btn sm" data-swap="${s.id}" data-meal="${s.meal}" title="Cambia ricetta">⇄</button></div>`).join('')}
     </div>`;
   }).join('')}</div>`;
@@ -54,6 +55,11 @@ function renderPlan() {
     const o = e.target.closest('[data-open]'); if (o) return explode(Number(o.dataset.open), Number(o.dataset.scale));
     const s = e.target.closest('[data-swap]'); if (s) return swapPicker(Number(s.dataset.swap), s.dataset.meal);
   };
+}
+function cookTag(s) {
+  const c = s.cook; if (!c || c.eaten < 2) return '';
+  return c.isCook ? `<span class="small" style="color:var(--acc)">👨‍🍳 cucini oggi ${Math.round(c.portions * 10) / 10} ${c.portions === 1 ? 'porzione' : 'porzioni'} (le mangi in ${c.eaten} pasti)</span>`
+    : `<span class="small" style="color:var(--acc)">🍱 avanzo di ${fmtDate(c.cookDate)}</span>`;
 }
 async function generate() { view.innerHTML = '<p class="mut">Calcolo il piano migliore…</p>'; await new Promise((r) => setTimeout(r, 50)); state = await api('/api/plan/generate', {}); render(); }
 
@@ -221,10 +227,9 @@ function renderSettings() {
 }
 
 async function boot() {
-  if (!store().recipes.length) {
-    const mac = await fetch('./recipes-pack.json', { cache: 'no-store' }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
-    if (mac) importFile(JSON.stringify(mac));
-  }
+  // sul Mac: se le ricette nel database sono cambiate, aggiornale in automatico (il piano e i dati restano)
+  const mac = await fetch('./recipes-pack.json', { cache: 'no-store' }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+  if (mac && (!store().recipes.length || stamp(mac.recipes) !== store().recipesStamp)) importFile(JSON.stringify(mac));
   await load();
   if (!store().recipes.length) { tab = 'data'; document.querySelectorAll('#tabs button').forEach((x) => x.classList.toggle('on', x.dataset.tab === 'data')); render(); }
 }

@@ -2,7 +2,7 @@
 import { state, commit, nextId, settings, ctx } from './store.js';
 import { DEFAULT_SETTINGS } from './core/settings.js';
 import { FOODS } from './core/foods.js';
-import { generatePlan, readPlan, dayTotals, nextMonday, addDays, isoDate, slotScale } from './core/planner.js';
+import { generatePlan, readPlan, dayTotals, nextMonday, addDays, isoDate, slotScale, cookInfo } from './core/planner.js';
 import { buildShopping } from './core/shopping.js';
 import { remindersFor, buildIcs } from './core/ics.js';
 
@@ -14,10 +14,11 @@ export const currentWeek = () => {
 };
 
 function weekPayload(week) {
-  const c = ctx(), plan = readPlan(c, week);
+  const c = ctx(), base = readPlan(c, week);
+  const ci = cookInfo(base), plan = base.map((p) => ({ ...p, cook: ci.byId[p.id] ?? null }));
   const sh = plan.length ? buildShopping(c, week) : null;
   return {
-    week, settings: c.settings, plan, totals: dayTotals(plan),
+    week, settings: c.settings, plan, totals: dayTotals(plan), cooking: { sessions: ci.batches.length, minutes: ci.minutes },
     shopping: sh && { total: sh.total, weeklyCost: sh.weeklyCost, wasteG: sh.wasteG, wasteEur: sh.wasteEur },
     reminders: plan.length ? remindersFor(c, week) : [],
   };

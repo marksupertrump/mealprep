@@ -13,17 +13,52 @@ export function nextMonday(from = new Date()) {
   return isoDate(d);
 }
 
-const portion = (r, scale) => r.ingredients.map((i) => [i.key, (i.g / r.servings) * scale]);
+const mealIdx = (e) => e.day * 10 + MEAL_ORDER.indexOf(e.meal);
+const isBatch = (r) => r.servings >= 3; // ricette "da più giorni": si cucinano a batch intero
+
 export function slotScale(r, targetKcal) {
   const s = targetKcal / Math.max(r.kcal, 1);
+  if (r.discrete) return Math.max(1, Math.round(s)); // muffin, pancake: pezzi interi
   return Math.min(1.6, Math.max(0.5, Math.round(s * 4) / 4));
+}
+
+// Sessioni di cucina. Ricette da >=3 porzioni: si cucina il batch intero e le porzioni si ritrovano nei giorni dopo
+// (entro i giorni di frigo). Le altre: si cucina solo quanto serve. Ogni sessione usa gli ingredienti nel giorno in cui si cucina.
+export function cookPlan(entries) {
+  const byRecipe = new Map();
+  for (const e of entries) { if (!byRecipe.has(e.recipe.id)) byRecipe.set(e.recipe.id, []); byRecipe.get(e.recipe.id).push(e); }
+  const batches = [];
+  for (const list of byRecipe.values()) {
+    list.sort((a, b) => mealIdx(a) - mealIdx(b));
+    const r = list[0].recipe, batch = isBatch(r);
+    let open = null;
+    for (const e of list) {
+      const fits = open && e.day - open.startDay <= r.fridge && (!batch || open.used + e.scale <= open.cap * 1.25 + 0.01);
+      if (!fits) { open = { recipe: r, startDay: e.day, cap: batch ? r.servings : 0, used: 0, entries: [] }; batches.push(open); }
+      open.used += e.scale; open.entries.push(e);
+    }
+  }
+  let minutes = 0, leftoverValue = 0, leftoverPortions = 0;
+  for (const b of batches) {
+    b.batch = isBatch(b.recipe);
+    b.factor = b.batch ? Math.max(1, Math.ceil((b.used / b.cap) * 4) / 4) : b.used / b.recipe.servings; // si cucina in proporzione, mai meno di 1 ricetta
+    b.leftover = b.batch ? Math.max(0, b.factor * b.cap - b.used) : 0;
+    minutes += b.recipe.prep_min + b.recipe.cook_min;
+    // avanzi a fine settimana: si possono ancora mangiare la settimana dopo, penalità dimezzata
+    const lastEat = b.startDay + b.recipe.fridge;
+    const w = lastEat >= 7 ? 0.5 : 1;
+    leftoverValue += b.leftover * (b.recipe.est_cost ?? 1) * w; leftoverPortions += b.leftover * w;
+  }
+  return { batches, minutes, leftoverValue, leftoverPortions };
 }
 
 // Costo d'acquisto + spreco. Freschi: confezione intera (l'avanzo è spreco). Alimenti che durano: solo il consumato.
 export function evaluate(entries, pantry = {}) {
+  const cook = cookPlan(entries);
   const need = {};
-  for (const e of entries) for (const [k, g] of portion(e.recipe, e.scale)) {
-    (need[k] ??= { g: 0, days: [] }).g += g; need[k].days.push(e.day);
+  for (const b of cook.batches) for (const i of b.recipe.ingredients) {
+    const n = (need[i.key] ??= { g: 0, days: [] });
+    n.g += i.g * b.factor; n.days.push(b.startDay);
   }
   let cost = 0, waste = 0, wasteG = 0, spoil = 0;
   for (const [k, n] of Object.entries(need)) {
@@ -40,14 +75,29 @@ export function evaluate(entries, pantry = {}) {
     const span = Math.max(...n.days) - Math.min(...n.days);
     if (f.life && !f.frozen && span > f.life - 1) spoil += (span - f.life + 1) * 2;
   }
-  return { cost, waste, wasteG, spoil, need };
+  return { cost, waste, wasteG, spoil, need, cook };
+}
+
+// Info per l'interfaccia: per ogni pasto, se si cucina quel giorno o è un avanzo
+export function cookInfo(entries) {
+  const out = {}, cp = cookPlan(entries);
+  for (const b of cp.batches) {
+    const sorted = [...b.entries].sort((x, y) => mealIdx(x) - mealIdx(y));
+    for (const [i, e] of sorted.entries()) out[e.id] = { isCook: i === 0, cookDay: b.startDay, cookDate: sorted[0].date, portions: b.batch ? b.factor * b.cap : b.used, eaten: sorted.length, leftover: b.leftover, dates: sorted.map((x) => x.date) };
+  }
+  return { byId: out, batches: cp.batches, minutes: cp.minutes };
 }
 
 function mulberry(seed) { let a = seed; return () => { a |= 0; a = (a + 0x6D2B79F5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
 
 export function generatePlan(ctx, { weekStart, seed = Date.now(), iterations = 25000, locked = {}, restarts = 4 } = {}) {
   let top = null;
-  for (let i = 0; i < restarts; i++) { const r = searchPlan(ctx, { weekStart, seed: seed + i * 7919, iterations, locked }); if (!top || r.pen < top.pen) top = r; }
+  // se il risultato sfora il budget massimo riprova (poche volte): evita i rari piani sbagliati
+  for (let i = 0; i < restarts * 3; i++) {
+    if (i >= restarts && top.ev.cost <= ctx.settings.budget_max) break;
+    const r = searchPlan(ctx, { weekStart, seed: seed + i * 7919, iterations, locked });
+    if (!top || r.pen < top.pen) top = r;
+  }
   return top;
 }
 
@@ -57,7 +107,6 @@ function searchPlan(ctx, { weekStart, seed, iterations, locked }) {
   if (!pools.colazione.length || !pools.main.length || !pools.snack.length) throw new Error('Servono ricette di colazione, pranzo/cena e spuntino: importa le ricette dalla scheda Dati.');
   const rnd = mulberry(seed);
   const pick = (a) => a[Math.floor(rnd() * a.length)];
-  const maxUse = (r) => (r.fridge >= 3 ? 3 : 2);
 
   const slotsOf = (d) => [
     { day: d, meal: 'colazione', pool: 'colazione', share: SLOT_SHARE.colazione },
@@ -82,6 +131,9 @@ function searchPlan(ctx, { weekStart, seed, iterations, locked }) {
     locked[i] = r; usedDays.add(slots[i].day);
   }
 
+  const batchRecipes = recipes.filter((r) => isBatch(r) && r.meal !== 'snack');
+  const poolIdx = { colazione: [], main: [], snack: [] };
+  slots.forEach((sl, i) => poolIdx[sl.pool].push(i));
   const kcalTarget = S.kcal_target;
   const shareSum = slotsOf(0).reduce((a, s) => a + s.share, 0);
   const build = (assign) => slots.map((s, i) => ({ ...s, recipe: assign[i], scale: slotScale(assign[i], (kcalTarget * s.share) / shareSum) }));
@@ -93,18 +145,22 @@ function searchPlan(ctx, { weekStart, seed, iterations, locked }) {
     pen += ev.cost > S.budget_week ? (ev.cost - S.budget_week) * 9 : (ev.cost / S.budget_week) * 2;
     if (ev.cost > S.budget_max) pen += (ev.cost - S.budget_max) * 30;
     pen += ev.waste * 3 + ev.spoil;
+    pen += ev.cook.minutes / 6 + ev.cook.leftoverValue * 6 + ev.cook.leftoverPortions * 2;
     for (let d = 0; d < 7; d++) {
       const day = entries.filter((e) => e.day === d);
       const kcal = day.reduce((a, e) => a + e.recipe.kcal * e.scale, 0);
       const pro = day.reduce((a, e) => a + e.recipe.protein * e.scale, 0);
-      pen += Math.abs(kcal - kcalTarget) / 40;
-      if (pro < S.protein_g) pen += (S.protein_g - pro) / 1.2;
-      const mains = day.filter((e) => e.pool === 'main').map((e) => e.recipe.id);
-      if (mains[0] === mains[1]) pen += 8;
+      pen += Math.abs(kcal - kcalTarget) / 30;
+      if (pro < S.protein_g) pen += (S.protein_g - pro) / 0.8;
+      const ids = day.map((e) => e.recipe.id);
+      pen += (ids.length - new Set(ids).size) * 14; // stesso piatto due volte nello stesso giorno = noia
     }
-    const uses = new Map();
-    for (const e of entries) uses.set(e.recipe.id, (uses.get(e.recipe.id) ?? 0) + 1);
-    for (const [id, n] of uses) { const r = recipes.find((x) => x.id === id); if (n > maxUse(r)) pen += (n - maxUse(r)) * 25; }
+    const eaten = new Map(); // varietà: oltre 4 pasti dello stesso piatto a settimana si annoia
+    for (const e of entries) eaten.set(e.recipe.id, (eaten.get(e.recipe.id) ?? 0) + 1);
+    for (const n of eaten.values()) if (n > 4) pen += (n - 4) * 10;
+    const times = new Map(); // quante volte si cucina lo stesso piatto nella settimana
+    for (const b of ev.cook.batches) times.set(b.recipe.id, (times.get(b.recipe.id) ?? 0) + 1);
+    for (const [id, n] of times) { const r = recipes.find((x) => x.id === id); if (n > (isBatch(r) ? 1 : 2)) pen += (n - (isBatch(r) ? 1 : 2)) * (isBatch(r) ? 70 : 25); }
     return { pen, ev, entries };
   };
 
@@ -112,8 +168,15 @@ function searchPlan(ctx, { weekStart, seed, iterations, locked }) {
   let cur = slots.map((s, i) => locked[i] ?? pick(pools[s.pool])), curScore = score(cur);
   for (let it = 0; it < iterations; it++) {
     const cand = cur.slice();
-    const n = rnd() < 0.3 ? 2 : 1;
-    for (let k = 0; k < n; k++) { const i = Math.floor(rnd() * slots.length); if (locked[i] == null) cand[i] = pick(pools[slots[i].pool]); }
+    if (batchRecipes.length && rnd() < 0.35) {
+      // mossa a batch: una ricetta da più porzioni occupa gli slot consecutivi dello stesso tipo
+      const r = pick(batchRecipes), idx = poolIdx[r.meal === 'main' ? 'main' : r.meal];
+      const p = Math.floor(rnd() * idx.length);
+      for (let k = 0; k < r.servings && p + k < idx.length; k++) if (locked[idx[p + k]] == null) cand[idx[p + k]] = r;
+    } else {
+      const n = rnd() < 0.3 ? 2 : 1;
+      for (let k = 0; k < n; k++) { const i = Math.floor(rnd() * slots.length); if (locked[i] == null) cand[i] = pick(pools[slots[i].pool]); }
+    }
     const sc = score(cand);
     const T = 3 * (1 - it / iterations) + 0.01;
     if (sc.pen < curScore.pen || rnd() < Math.exp((curScore.pen - sc.pen) / T)) { cur = cand; curScore = sc; }

@@ -1,5 +1,5 @@
 // Calendario iCalendar (RFC 5545) con i reminder: spesa e scongelamento. Orari "floating" = ora locale del dispositivo.
-import { addDays, isoDate } from './planner.js';
+import { addDays, isoDate, readPlan, cookInfo } from './planner.js';
 import { thawEvents, buildShopping } from './shopping.js';
 
 const esc = (s) => String(s).replace(/\\/g, '\\\\').replace(/;/g, '\;').replace(/,/g, '\\,').replace(/\n/g, '\\n');
@@ -29,6 +29,14 @@ export function remindersFor(ctx, weekStart, today = isoDate(new Date())) {
     out.push({ uid: `scongela-${night}`, date: night, start: '20:30', end: '20:45', alarmMin: 0,
       title: `🧊 Scongela: ${[...new Set(evs.map((e) => e.food))].join(', ')}`,
       desc: evs.map((e) => `${e.food} → ${e.recipe} (${e.date}, ${e.meal}). Sposta dal freezer al frigo.`).join('\n') });
+  }
+  // sessioni di cucina con più porzioni: "cucina oggi, mangi nei giorni dopo"
+  for (const b of cookInfo(readPlan(ctx, weekStart)).batches) {
+    const date = addDays(weekStart, b.startDay);
+    if (date < today || b.entries.length < 2) continue;
+    out.push({ uid: `cucina-${date}-${b.recipe.id}`, date, start: '18:30', end: '19:30', alarmMin: 30,
+      title: `👨‍🍳 Cucina: ${b.recipe.title} (${b.batch ? b.recipe.servings : b.entries.length} porzioni)`,
+      desc: `Cucini una volta e lo ritrovi a: ${b.entries.map((e) => e.date).join(', ')}.\nTempo: ~${b.recipe.prep_min + b.recipe.cook_min} min. Si conserva ${b.recipe.fridge} giorni in frigo.` });
   }
   return out;
 }
